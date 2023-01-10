@@ -122,7 +122,7 @@ func (s *CacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 }
 
 func (s *CacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
-	// no cache for this call (only admin should see)
+	// no cache for this call (only admin should use)
 	roles, err := s.inner.ListRoles(ctx, request)
 	if err == nil {
 		pipe := s.rdb.TxPipeline()
