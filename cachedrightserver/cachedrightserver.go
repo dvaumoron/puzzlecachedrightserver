@@ -122,8 +122,21 @@ func (s *CacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 }
 
 func (s *CacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
-	// no cache for this (only admin should see)
-	return s.inner.ListRoles(ctx, request)
+	// no cache for this call (only admin should see)
+	roles, err := s.inner.ListRoles(ctx, request)
+	if err == nil {
+		pipe := s.rdb.TxPipeline()
+		for _, role := range roles.List {
+			roleKey := getRoleKey(role.Name, role.ObjectId)
+			actionsStr, _ := actionsFromCall(role.List)
+			pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
+		}
+		_, err2 := pipe.Exec(ctx)
+		if err2 != nil {
+			log.Println(cacheStorageMsg, err2)
+		}
+	}
+	return roles, err
 }
 
 func (s *CacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*pb.Actions, error) {
