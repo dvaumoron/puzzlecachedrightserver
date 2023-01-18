@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/dvaumoron/puzzlecachedrightserver/cachedrightserver"
+	redisclient "github.com/dvaumoron/puzzleredisclient"
 	pb "github.com/dvaumoron/puzzlerightservice"
-	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"google.golang.org/grpc"
 )
@@ -43,22 +43,12 @@ func main() {
 	}
 	dataTimeout := time.Duration(dataTimeoutSec) * time.Second
 
-	dbNum, err := strconv.Atoi(os.Getenv("REDIS_SERVER_DB"))
-	if err != nil {
-		log.Fatal("Failed to parse REDIS_SERVER_DB")
-	}
-
 	lis, err := net.Listen("tcp", ":"+os.Getenv("SERVICE_PORT"))
 	if err != nil {
 		log.Fatalf("Failed to listen : %v", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("REDIS_SERVER_ADDR"),
-		Username: os.Getenv("REDIS_SERVER_USERNAME"),
-		Password: os.Getenv("REDIS_SERVER_PASSWORD"),
-		DB:       dbNum,
-	})
+	rdb := redisclient.Create()
 
 	s := grpc.NewServer()
 	pb.RegisterRightServer(s, cachedrightserver.New(
