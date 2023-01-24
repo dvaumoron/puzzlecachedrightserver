@@ -19,7 +19,6 @@ package cachedrightserver
 
 import (
 	"context"
-	"time"
 
 	pb "github.com/dvaumoron/puzzlerightservice"
 	"google.golang.org/grpc"
@@ -38,85 +37,61 @@ func newCalling(rightServiceAddr string) *callingServer {
 }
 
 func (s *callingServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {
-	var response *pb.Response
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		response, err = pb.NewRightClient(conn).AuthQuery(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).AuthQuery(ctx, request)
 }
 
 func (s *callingServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
-	var response *pb.Roles
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		response, err = pb.NewRightClient(conn).ListRoles(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).ListRoles(ctx, request)
 }
 
 func (s *callingServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*pb.Actions, error) {
-	var actions *pb.Actions
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		actions, err = pb.NewRightClient(conn).RoleRight(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return actions, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).RoleRight(ctx, request)
 }
 
 func (s *callingServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
-	var response *pb.Response
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		response, err = pb.NewRightClient(conn).UpdateUser(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).UpdateUser(ctx, request)
 }
 
 func (s *callingServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
-	var response *pb.Response
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		response, err = pb.NewRightClient(conn).UpdateRole(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).UpdateRole(ctx, request)
 }
 
 func (s *callingServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*pb.Roles, error) {
-	var roles *pb.Roles
 	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err == nil {
-		defer conn.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		roles, err = pb.NewRightClient(conn).ListUserRoles(ctx, request)
+	if err != nil {
+		return nil, err
 	}
-	return roles, err
+	defer conn.Close()
+
+	return pb.NewRightClient(conn).ListUserRoles(ctx, request)
 }
