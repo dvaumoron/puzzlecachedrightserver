@@ -32,8 +32,8 @@ type callingServer struct {
 	rightServiceAddr string
 }
 
-func newCalling(rightServiceAddr string) *callingServer {
-	return &callingServer{rightServiceAddr: rightServiceAddr}
+func makeCallingServer(rightServiceAddr string) callingServer {
+	return callingServer{rightServiceAddr: rightServiceAddr}
 }
 
 func (s *callingServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {

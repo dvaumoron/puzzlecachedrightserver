@@ -43,21 +43,26 @@ const cacheStorageMsg = "Failed to store in cache :"
 type empty = struct{}
 
 // cacheServer implement puzzlerightservice.RightServer
-// it add a cache management and delegate to a CallingServer
+// it add a cache management and delegate to a callingServer
 type cacheServer struct {
-	pb.UnimplementedRightServer
-	inner       *callingServer
+	callingServer
 	rdb         *redis.Client
 	dataTimeout time.Duration
+	ttlUpdater  func(*redis.Client, context.Context, string, time.Duration)
 	mutex       sync.RWMutex
 	roleToUser  map[string]map[uint64]empty
 	sf          singleflight.Group
 }
 
 func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration) pb.RightServer {
+	ttlUpdater := updateWithTTL
+	if dataTimeout <= 0 {
+		dataTimeout = 0
+		ttlUpdater = noTTLUpdate
+	}
 	return &cacheServer{
-		inner: newCalling(rightServiceAddr), rdb: rdb, dataTimeout: dataTimeout,
-		roleToUser: map[string]map[uint64]empty{},
+		callingServer: makeCallingServer(rightServiceAddr), rdb: rdb, dataTimeout: dataTimeout,
+		ttlUpdater: ttlUpdater, roleToUser: map[string]map[uint64]empty{},
 	}
 }
 
@@ -72,11 +77,17 @@ func (s *cacheServer) storeRoleToUser(roleKey string, userId uint64) {
 	}
 }
 
-func (s *cacheServer) updateWithDefaultTTL(ctx context.Context, id string) {
-	err := s.rdb.Expire(ctx, id, s.dataTimeout)
-	if err != nil {
+func updateWithTTL(rdb *redis.Client, ctx context.Context, id string, dataTimeout time.Duration) {
+	if err := rdb.Expire(ctx, id, dataTimeout); err != nil {
 		log.Println("Failed to set TTL :", err)
 	}
+}
+
+func noTTLUpdate(rdb *redis.Client, ctx context.Context, id string, dataTimeout time.Duration) {
+}
+
+func (s *cacheServer) updateWithTTL(ctx context.Context, id string) {
+	s.ttlUpdater(s.rdb, ctx, id, s.dataTimeout)
 }
 
 func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {
@@ -91,11 +102,11 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 	untyped, err, _ := s.sf.Do(requestKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.HGet(ctx, userKey, actionKey).Result()
 		if err == nil {
-			s.updateWithDefaultTTL(ctx, userKey)
+			s.updateWithTTL(ctx, userKey)
 			return &pb.Response{Success: cacheRes == trueIndicator}, nil
 		}
 
-		response, err := s.inner.AuthQuery(ctx, request)
+		response, err := s.callingServer.AuthQuery(ctx, request)
 		if err == nil {
 			// this call serves to keep roleToUser up to date,
 			// when the user roles are not in cache
@@ -109,7 +120,7 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 			}
 			err2 := s.rdb.HSet(ctx, userKey, actionKey, value).Err()
 			if err2 == nil {
-				s.updateWithDefaultTTL(ctx, userKey)
+				s.updateWithTTL(ctx, userKey)
 			} else {
 				log.Println(cacheStorageMsg, err2)
 			}
@@ -122,7 +133,7 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 
 func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
 	// no cache for this call (only admin should use)
-	roles, err := s.inner.ListRoles(ctx, request)
+	roles, err := s.callingServer.ListRoles(ctx, request)
 	if err == nil {
 		pipe := s.rdb.TxPipeline()
 		for _, role := range roles.List {
@@ -143,16 +154,16 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 	untyped, err, _ := s.sf.Do(roleKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.Get(ctx, roleKey).Result()
 		if err == nil {
-			s.updateWithDefaultTTL(ctx, roleKey)
+			s.updateWithTTL(ctx, roleKey)
 			return &pb.Actions{List: actionsFromCache(cacheRes)}, nil
 		}
 
-		actions, err := s.inner.RoleRight(ctx, request)
+		actions, err := s.callingServer.RoleRight(ctx, request)
 		if err == nil {
 			actionsStr, _ := actionsFromCall(actions.List)
 			err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
 			if err2 == nil {
-				s.updateWithDefaultTTL(ctx, roleKey)
+				s.updateWithTTL(ctx, roleKey)
 			} else {
 				log.Println(cacheStorageMsg, err2)
 			}
@@ -164,7 +175,7 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 }
 
 func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
-	response, err := s.inner.UpdateUser(ctx, request)
+	response, err := s.callingServer.UpdateUser(ctx, request)
 	if err == nil && response.Success {
 		// invalidate corresponding key in cache
 		err2 := s.rdb.Del(ctx, getUserKey(request.UserId)).Err()
@@ -176,7 +187,7 @@ func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*p
 }
 
 func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
-	response, err := s.inner.UpdateRole(ctx, request)
+	response, err := s.callingServer.UpdateRole(ctx, request)
 	if err == nil && response.Success {
 		// invalidate corresponding key in cache
 		roleKey := getRoleKey(request.Name, request.ObjectId)
@@ -191,7 +202,7 @@ func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Res
 			actionsStr, _ := actionsFromCall(request.List)
 			err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
 			if err2 == nil {
-				s.updateWithDefaultTTL(ctx, roleKey)
+				s.updateWithTTL(ctx, roleKey)
 			}
 		}
 		if err2 != nil {
@@ -207,7 +218,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 	untyped, err, _ := s.sf.Do(userKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.HGetAll(ctx, userKey).Result()
 		if err == nil {
-			s.updateWithDefaultTTL(ctx, userKey)
+			s.updateWithTTL(ctx, userKey)
 
 			list := []*pb.Role{}
 			for roleKey, actions := range cacheRes {
@@ -223,7 +234,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			return &pb.Roles{List: list}, nil
 		}
 
-		roles, err := s.inner.ListUserRoles(ctx, request)
+		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err == nil {
 			userData := map[string]any{}
 			actionSetByObject := map[uint64]map[pb.RightAction]empty{}
@@ -271,7 +282,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			pipe.Del(ctx, userKey)
 			pipe.HSet(ctx, userKey, userData)
 			if _, err2 := pipe.Exec(ctx); err2 == nil {
-				s.updateWithDefaultTTL(ctx, userKey)
+				s.updateWithTTL(ctx, userKey)
 			} else {
 				log.Println(cacheStorageMsg, err2)
 			}
