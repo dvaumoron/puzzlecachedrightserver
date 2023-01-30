@@ -39,7 +39,7 @@ const createIndicator = 'C'
 const updateIndicator = 'U'
 const deleteIndicator = 'D'
 
-const processRightMsg = "Failed during processing cached right call :"
+const rightCallMsg = "Failed to call right service :"
 const cacheAccessMsg = "Failed to access cache :"
 const cacheStorageMsg = "Failed to store in cache :"
 
@@ -113,35 +113,34 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 		log.Println(cacheAccessMsg, err)
 
 		response, err := s.callingServer.AuthQuery(ctx, request)
-		if err == nil {
-			value := ""
-			if response.Success {
-				value = trueIndicator
-			} else {
-				value = falseIndicator
-			}
-			err2 := s.rdb.HSet(ctx, userKey, actionKey, value).Err()
-			if err2 == nil {
-				s.updateWithTTL(ctx, userKey)
-			} else {
-				log.Println(cacheStorageMsg, err2)
-			}
+		if err != nil {
+			log.Println(rightCallMsg, err)
+			return nil, errInternal
 		}
-		return response, err
+
+		value := ""
+		if response.Success {
+			value = trueIndicator
+		} else {
+			value = falseIndicator
+		}
+		err2 := s.rdb.HSet(ctx, userKey, actionKey, value).Err()
+		if err2 == nil {
+			s.updateWithTTL(ctx, userKey)
+		} else {
+			log.Println(cacheStorageMsg, err2)
+		}
+		return response, nil
 	})
-	if err != nil {
-		log.Println(processRightMsg, err)
-		return nil, errInternal
-	}
 	response, _ := untyped.(*pb.Response)
-	return response, nil
+	return response, err
 }
 
 func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
 	// no cache for this call (only admin should use)
 	roles, err := s.callingServer.ListRoles(ctx, request)
 	if err != nil {
-		log.Println(processRightMsg, err)
+		log.Println(rightCallMsg, err)
 		return nil, errInternal
 	}
 	pipe := s.rdb.TxPipeline()
@@ -168,29 +167,28 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 		log.Println(cacheAccessMsg, err)
 
 		actions, err := s.callingServer.RoleRight(ctx, request)
-		if err == nil {
-			actionsStr, _ := actionsFromCall(actions.List)
-			err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
-			if err2 == nil {
-				s.updateWithTTL(ctx, roleKey)
-			} else {
-				log.Println(cacheStorageMsg, err2)
-			}
+		if err != nil {
+			log.Println(rightCallMsg, err)
+			return nil, errInternal
+		}
+
+		actionsStr, _ := actionsFromCall(actions.List)
+		err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
+		if err2 == nil {
+			s.updateWithTTL(ctx, roleKey)
+		} else {
+			log.Println(cacheStorageMsg, err2)
 		}
 		return actions, err
 	})
-	if err != nil {
-		log.Println(processRightMsg, err)
-		return nil, errInternal
-	}
 	actions, _ := untyped.(*pb.Actions)
-	return actions, nil
+	return actions, err
 }
 
 func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateUser(ctx, request)
 	if err != nil {
-		log.Println(processRightMsg, err)
+		log.Println(rightCallMsg, err)
 		return nil, errInternal
 	}
 	if response.Success {
@@ -206,7 +204,7 @@ func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*p
 func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateRole(ctx, request)
 	if err != nil {
-		log.Println(processRightMsg, err)
+		log.Println(rightCallMsg, err)
 		return nil, errInternal
 	}
 	if response.Success {
@@ -258,7 +256,8 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err != nil {
-			return nil, err
+			log.Println(rightCallMsg, err)
+			return nil, errInternal
 		}
 
 		userData := map[string]any{}
@@ -313,12 +312,8 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 		}
 		return roles, nil
 	})
-	if err != nil {
-		log.Println(processRightMsg, err)
-		return nil, errInternal
-	}
 	roles, _ := untyped.(*pb.Roles)
-	return roles, nil
+	return roles, err
 }
 
 func getUserKey(userId uint64) string {
