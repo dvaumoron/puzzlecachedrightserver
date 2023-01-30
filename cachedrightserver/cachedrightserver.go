@@ -19,6 +19,7 @@ package cachedrightserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -38,7 +39,10 @@ const createIndicator = 'C'
 const updateIndicator = 'U'
 const deleteIndicator = 'D'
 
+const processRightMsg = "Failed during processing cached right call :"
 const cacheStorageMsg = "Failed to store in cache :"
+
+var errInternal = errors.New("internal service error")
 
 type empty = struct{}
 
@@ -127,26 +131,32 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 		}
 		return response, err
 	})
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
+	}
 	response, _ := untyped.(*pb.Response)
-	return response, err
+	return response, nil
 }
 
 func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
 	// no cache for this call (only admin should use)
 	roles, err := s.callingServer.ListRoles(ctx, request)
-	if err == nil {
-		pipe := s.rdb.TxPipeline()
-		for _, role := range roles.List {
-			roleKey := getRoleKey(role.Name, role.ObjectId)
-			actionsStr, _ := actionsFromCall(role.List)
-			pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
-		}
-		_, err2 := pipe.Exec(ctx)
-		if err2 != nil {
-			log.Println(cacheStorageMsg, err2)
-		}
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
 	}
-	return roles, err
+	pipe := s.rdb.TxPipeline()
+	for _, role := range roles.List {
+		roleKey := getRoleKey(role.Name, role.ObjectId)
+		actionsStr, _ := actionsFromCall(role.List)
+		pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
+	}
+	_, err2 := pipe.Exec(ctx)
+	if err2 != nil {
+		log.Println(cacheStorageMsg, err2)
+	}
+	return roles, nil
 }
 
 func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*pb.Actions, error) {
@@ -170,25 +180,37 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 		}
 		return actions, err
 	})
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
+	}
 	actions, _ := untyped.(*pb.Actions)
-	return actions, err
+	return actions, nil
 }
 
 func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateUser(ctx, request)
-	if err == nil && response.Success {
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
+	}
+	if response.Success {
 		// invalidate corresponding key in cache
 		err2 := s.rdb.Del(ctx, getUserKey(request.UserId)).Err()
 		if err2 != nil {
 			log.Println(cacheStorageMsg, err2)
 		}
 	}
-	return response, err
+	return response, nil
 }
 
 func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateRole(ctx, request)
-	if err == nil && response.Success {
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
+	}
+	if response.Success {
 		// invalidate corresponding key in cache
 		roleKey := getRoleKey(request.Name, request.ObjectId)
 		keys := []string{roleKey}
@@ -209,7 +231,7 @@ func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Res
 			log.Println(cacheStorageMsg, err2)
 		}
 	}
-	return response, err
+	return response, nil
 }
 
 func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*pb.Roles, error) {
@@ -235,62 +257,68 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 		}
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
-		if err == nil {
-			userData := map[string]any{}
-			actionSetByObject := map[uint64]map[pb.RightAction]empty{}
-			for _, role := range roles.List {
-				objectId := role.ObjectId
-				roleKey := getRoleKey(role.Name, objectId)
-				s.storeRoleToUser(roleKey, userId)
+		if err != nil {
+			return nil, err
+		}
 
-				actionsStr, actionSet := actionsFromCall(role.List)
-				userData[roleKey] = actionsStr
+		userData := map[string]any{}
+		actionSetByObject := map[uint64]map[pb.RightAction]empty{}
+		for _, role := range roles.List {
+			objectId := role.ObjectId
+			roleKey := getRoleKey(role.Name, objectId)
+			s.storeRoleToUser(roleKey, userId)
 
-				globalActionSet := actionSetByObject[objectId]
-				if globalActionSet == nil {
-					globalActionSet = actionSet
-				} else {
-					for action := range actionSet {
-						globalActionSet[action] = empty{}
-					}
-				}
-				actionSetByObject[objectId] = globalActionSet
-			}
+			actionsStr, actionSet := actionsFromCall(role.List)
+			userData[roleKey] = actionsStr
 
-			pipe := s.rdb.TxPipeline()
-			// here userData contains only the roles
-			for roleKey, actionsStr := range userData {
-				pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
-			}
-
-			actionKeyIndicators := map[string]string{}
-			for objectId, actionSet := range actionSetByObject {
-				for action := range pb.RightAction_name {
-					actionKey := getActionKey(objectId, pb.RightAction(action))
-					actionKeyIndicators[actionKey] = falseIndicator
-				}
-				for action := range actionSet {
-					actionKey := getActionKey(objectId, action)
-					actionKeyIndicators[actionKey] = trueIndicator
-				}
-			}
-
-			for actionKey, indicator := range actionKeyIndicators {
-				userData[actionKey] = indicator
-			}
-
-			pipe.Del(ctx, userKey)
-			pipe.HSet(ctx, userKey, userData)
-			if _, err2 := pipe.Exec(ctx); err2 == nil {
-				s.updateWithTTL(ctx, userKey)
+			globalActionSet := actionSetByObject[objectId]
+			if globalActionSet == nil {
+				globalActionSet = actionSet
 			} else {
-				log.Println(cacheStorageMsg, err2)
+				for action := range actionSet {
+					globalActionSet[action] = empty{}
+				}
+			}
+			actionSetByObject[objectId] = globalActionSet
+		}
+
+		pipe := s.rdb.TxPipeline()
+		// here userData contains only the roles
+		for roleKey, actionsStr := range userData {
+			pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
+		}
+
+		actionKeyIndicators := map[string]string{}
+		for objectId, actionSet := range actionSetByObject {
+			for action := range pb.RightAction_name {
+				actionKey := getActionKey(objectId, pb.RightAction(action))
+				actionKeyIndicators[actionKey] = falseIndicator
+			}
+			for action := range actionSet {
+				actionKey := getActionKey(objectId, action)
+				actionKeyIndicators[actionKey] = trueIndicator
 			}
 		}
-		return roles, err
+
+		for actionKey, indicator := range actionKeyIndicators {
+			userData[actionKey] = indicator
+		}
+
+		pipe.Del(ctx, userKey)
+		pipe.HSet(ctx, userKey, userData)
+		if _, err2 := pipe.Exec(ctx); err2 == nil {
+			s.updateWithTTL(ctx, userKey)
+		} else {
+			log.Println(cacheStorageMsg, err2)
+		}
+		return roles, nil
 	})
+	if err != nil {
+		log.Println(processRightMsg, err)
+		return nil, errInternal
+	}
 	roles, _ := untyped.(*pb.Roles)
-	return roles, err
+	return roles, nil
 }
 
 func getUserKey(userId uint64) string {
