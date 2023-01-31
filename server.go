@@ -18,7 +18,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -34,7 +33,7 @@ import (
 
 func main() {
 	if godotenv.Overload() == nil {
-		fmt.Println("Loaded .env file")
+		log.Println("Loaded .env file")
 	}
 
 	dataTimeoutSec, err := strconv.ParseInt(os.Getenv("UNUSED_DATA_TIMEOUT"), 10, 64)
@@ -45,7 +44,7 @@ func main() {
 
 	lis, err := net.Listen("tcp", ":"+os.Getenv("SERVICE_PORT"))
 	if err != nil {
-		log.Fatalf("Failed to listen : %v", err)
+		log.Fatal("Failed to listen :", err)
 	}
 
 	rdb := redisclient.Create()
@@ -54,8 +53,8 @@ func main() {
 	pb.RegisterRightServer(s, cachedrightserver.New(
 		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout,
 	))
-	log.Printf("Listening at %v", lis.Addr())
+	log.Println("Listening at", lis.Addr())
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve : %v", err)
+		log.Fatal("Failed to serve :", err)
 	}
 }

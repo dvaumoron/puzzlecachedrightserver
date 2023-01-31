@@ -28,7 +28,7 @@ import (
 	"time"
 
 	pb "github.com/dvaumoron/puzzlerightservice"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
 
