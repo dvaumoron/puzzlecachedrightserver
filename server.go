@@ -19,22 +19,19 @@ package main
 
 import (
 	"log"
-	"net"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/dvaumoron/puzzlecachedrightserver/cachedrightserver"
+	grpcserver "github.com/dvaumoron/puzzlegrpcserver"
 	redisclient "github.com/dvaumoron/puzzleredisclient"
 	pb "github.com/dvaumoron/puzzlerightservice"
-	"github.com/joho/godotenv"
-	"google.golang.org/grpc"
 )
 
 func main() {
-	if godotenv.Overload() == nil {
-		log.Println("Loaded .env file")
-	}
+	// should start with this, to benefit from the call to godotenv
+	s := grpcserver.New()
 
 	dataTimeoutSec, err := strconv.ParseInt(os.Getenv("UNUSED_DATA_TIMEOUT"), 10, 64)
 	if err != nil {
@@ -42,19 +39,11 @@ func main() {
 	}
 	dataTimeout := time.Duration(dataTimeoutSec) * time.Second
 
-	lis, err := net.Listen("tcp", ":"+os.Getenv("SERVICE_PORT"))
-	if err != nil {
-		log.Fatal("Failed to listen :", err)
-	}
-
 	rdb := redisclient.Create()
 
-	s := grpc.NewServer()
 	pb.RegisterRightServer(s, cachedrightserver.New(
 		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout,
 	))
-	log.Println("Listening at", lis.Addr())
-	if err := s.Serve(lis); err != nil {
-		log.Fatal("Failed to serve :", err)
-	}
+
+	s.Start()
 }
