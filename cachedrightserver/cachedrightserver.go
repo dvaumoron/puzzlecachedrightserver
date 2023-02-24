@@ -83,7 +83,7 @@ func (s *cacheServer) storeRoleToUser(roleKey string, userId uint64) {
 }
 
 func updateWithTTL(rdb *redis.Client, ctx context.Context, id string, dataTimeout time.Duration) {
-	if err := rdb.Expire(ctx, id, dataTimeout); err != nil {
+	if err := rdb.Expire(ctx, id, dataTimeout).Err(); err != nil {
 		log.Println("Failed to set TTL :", err)
 	}
 }
