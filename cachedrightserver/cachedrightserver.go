@@ -59,7 +59,10 @@ type cacheServer struct {
 	sf          singleflight.Group
 }
 
-func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration) pb.RightServer {
+func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, debug bool) pb.RightServer {
+	if debug {
+		// TODO
+	}
 	ttlUpdater := updateWithTTL
 	if dataTimeout <= 0 {
 		dataTimeout = 0

@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dvaumoron/puzzlecachedrightserver/cachedrightserver"
@@ -39,10 +40,12 @@ func main() {
 	}
 	dataTimeout := time.Duration(dataTimeoutSec) * time.Second
 
+	debug := strings.TrimSpace(os.Getenv("DEBUG_MODE")) != ""
+
 	rdb := redisclient.Create()
 
 	pb.RegisterRightServer(s, cachedrightserver.New(
-		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout,
+		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout, debug,
 	))
 
 	s.Start()
