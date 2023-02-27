@@ -57,11 +57,17 @@ type cacheServer struct {
 	mutex       sync.RWMutex
 	roleToUser  map[string]map[uint64]empty
 	sf          singleflight.Group
+	roleUpdater func(*redis.Client, context.Context, *pb.Roles, time.Duration)
+	userUpdater func(*cacheServer, context.Context, string, map[string]any, map[string]string)
 }
 
 func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, debug bool) pb.RightServer {
+	rolesUpdater := updateRolesTx
+	userUpdater := updateUserTx
 	if debug {
-		// TODO
+		log.Println("Mode debug on")
+		rolesUpdater = updateRoles
+		userUpdater = updateUser
 	}
 	ttlUpdater := updateWithTTL
 	if dataTimeout <= 0 {
@@ -70,7 +76,8 @@ func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, 
 	}
 	return &cacheServer{
 		callingServer: makeCallingServer(rightServiceAddr), rdb: rdb, dataTimeout: dataTimeout,
-		ttlUpdater: ttlUpdater, roleToUser: map[string]map[uint64]empty{},
+		ttlUpdater: ttlUpdater, roleToUser: map[string]map[uint64]empty{}, roleUpdater: rolesUpdater,
+		userUpdater: userUpdater,
 	}
 }
 
@@ -146,16 +153,7 @@ func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb
 		log.Println(rightCallMsg, err)
 		return nil, errInternal
 	}
-	pipe := s.rdb.TxPipeline()
-	for _, role := range roles.List {
-		roleKey := getRoleKey(role.Name, role.ObjectId)
-		actionsStr, _ := actionsFromCall(role.List)
-		pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
-	}
-	_, err2 := pipe.Exec(ctx)
-	if err2 != nil {
-		log.Println(cacheStorageMsg, err2)
-	}
+	s.roleUpdater(s.rdb, ctx, roles, s.dataTimeout)
 	return roles, nil
 }
 
@@ -284,12 +282,6 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			actionSetByObject[objectId] = globalActionSet
 		}
 
-		pipe := s.rdb.TxPipeline()
-		// here userData contains only the roles
-		for roleKey, actionsStr := range userData {
-			pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
-		}
-
 		actionKeyIndicators := map[string]string{}
 		for objectId, actionSet := range actionSetByObject {
 			for action := range pb.RightAction_name {
@@ -302,17 +294,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			}
 		}
 
-		for actionKey, indicator := range actionKeyIndicators {
-			userData[actionKey] = indicator
-		}
-
-		pipe.Del(ctx, userKey)
-		pipe.HSet(ctx, userKey, userData)
-		if _, err2 := pipe.Exec(ctx); err2 == nil {
-			s.updateWithTTL(ctx, userKey)
-		} else {
-			log.Println(cacheStorageMsg, err2)
-		}
+		s.userUpdater(s, ctx, userKey, userData, actionKeyIndicators)
 		return roles, nil
 	})
 	roles, _ := untyped.(*pb.Roles)
@@ -377,4 +359,71 @@ func uniqueActions(actions []pb.RightAction) map[pb.RightAction]empty {
 		res[action] = empty{}
 	}
 	return res
+}
+
+func updateRolesTx(rdb *redis.Client, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+	pipe := rdb.TxPipeline()
+	for _, role := range roles.List {
+		roleKey := getRoleKey(role.Name, role.ObjectId)
+		actionsStr, _ := actionsFromCall(role.List)
+		pipe.Set(ctx, roleKey, actionsStr, dataTimeout)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Println(cacheStorageMsg, err)
+	}
+}
+
+func updateRoles(rdb *redis.Client, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+	for _, role := range roles.List {
+		roleKey := getRoleKey(role.Name, role.ObjectId)
+		actionsStr, _ := actionsFromCall(role.List)
+		if err := rdb.Set(ctx, roleKey, actionsStr, dataTimeout).Err(); err != nil {
+			log.Println(cacheStorageMsg, err)
+			return
+		}
+	}
+}
+
+func updateUserTx(s *cacheServer, ctx context.Context, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+	pipe := s.rdb.TxPipeline()
+	// here userData contains only the roles
+	for roleKey, actionsStr := range userData {
+		pipe.Set(ctx, roleKey, actionsStr, s.dataTimeout)
+	}
+
+	for actionKey, indicator := range actionKeyIndicators {
+		userData[actionKey] = indicator
+	}
+
+	pipe.Del(ctx, userKey)
+	pipe.HSet(ctx, userKey, userData)
+	if _, err := pipe.Exec(ctx); err == nil {
+		s.updateWithTTL(ctx, userKey)
+	} else {
+		log.Println(cacheStorageMsg, err)
+	}
+}
+
+func updateUser(s *cacheServer, ctx context.Context, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+	// here userData contains only the roles
+	for roleKey, actionsStr := range userData {
+		if err := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err(); err != nil {
+			log.Println(cacheStorageMsg, err)
+			return
+		}
+	}
+
+	for actionKey, indicator := range actionKeyIndicators {
+		userData[actionKey] = indicator
+	}
+
+	if err := s.rdb.Del(ctx, userKey).Err(); err != nil {
+		log.Println(cacheStorageMsg, err)
+		return
+	}
+	if err := s.rdb.HSet(ctx, userKey, userData).Err(); err != nil {
+		log.Println(cacheStorageMsg, err)
+		return
+	}
+	s.updateWithTTL(ctx, userKey)
 }
