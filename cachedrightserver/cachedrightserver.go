@@ -242,7 +242,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 
 			list := []*pb.Role{}
 			for roleKey, actions := range cacheRes {
-				if roleKey[:5] == "role:" {
+				if len(roleKey) >= 5 && roleKey[:5] == "role:" {
 					splitted := strings.Split(roleKey[5:], "/")
 					objectId, _ := strconv.ParseUint(splitted[1], 10, 64)
 					list = append(list, &pb.Role{
