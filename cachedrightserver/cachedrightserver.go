@@ -40,7 +40,6 @@ const updateIndicator = 'U'
 const deleteIndicator = 'D'
 
 const rightCallMsg = "Failed to call right service :"
-const cacheAccessMsg = "Failed to access cache :"
 const cacheStorageMsg = "Failed to store in cache :"
 
 var errInternal = errors.New("internal service error")
@@ -120,7 +119,7 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 			s.updateWithTTL(ctx, userKey)
 			return &pb.Response{Success: cacheRes == trueIndicator}, nil
 		}
-		log.Println(cacheAccessMsg, err)
+		logCacheAccessError(err)
 
 		response, err := s.callingServer.AuthQuery(ctx, request)
 		if err != nil {
@@ -165,7 +164,7 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 			s.updateWithTTL(ctx, roleKey)
 			return &pb.Actions{List: actionsFromCache(cacheRes)}, nil
 		}
-		log.Println(cacheAccessMsg, err)
+		logCacheAccessError(err)
 
 		actions, err := s.callingServer.RoleRight(ctx, request)
 		if err != nil {
@@ -253,7 +252,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			}
 			return &pb.Roles{List: list}, nil
 		}
-		log.Println(cacheAccessMsg, err)
+		logCacheAccessError(err)
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err != nil {
@@ -426,4 +425,10 @@ func updateUser(s *cacheServer, ctx context.Context, userKey string, userData ma
 		return
 	}
 	s.updateWithTTL(ctx, userKey)
+}
+
+func logCacheAccessError(err error) {
+	if err != redis.Nil {
+		log.Println("Failed to access cache :", err)
+	}
 }
