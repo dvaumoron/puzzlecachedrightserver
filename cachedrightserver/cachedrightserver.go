@@ -86,7 +86,12 @@ func (s *cacheServer) storeRoleToUser(roleKey string, userId uint64) {
 	s.mutex.RUnlock()
 	if !exists {
 		s.mutex.Lock()
-		s.roleToUser[roleKey][userId] = empty{}
+		idSet := s.roleToUser[roleKey]
+		if idSet == nil {
+			idSet = map[uint64]empty{}
+			s.roleToUser[roleKey] = idSet
+		}
+		idSet[userId] = empty{}
 		s.mutex.Unlock()
 	}
 }
@@ -250,9 +255,12 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 					})
 				}
 			}
-			return &pb.Roles{List: list}, nil
+			if len(list) != 0 {
+				return &pb.Roles{List: list}, nil
+			}
+		} else {
+			logCacheAccessError(err)
 		}
-		logCacheAccessError(err)
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err != nil {
