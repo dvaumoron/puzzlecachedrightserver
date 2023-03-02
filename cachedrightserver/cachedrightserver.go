@@ -403,7 +403,9 @@ func updateUserTx(s *cacheServer, ctx context.Context, userKey string, userData 
 	}
 
 	pipe.Del(ctx, userKey)
-	pipe.HSet(ctx, userKey, userData)
+	if len(userData) != 0 {
+		pipe.HSet(ctx, userKey, userData)
+	}
 	if _, err := pipe.Exec(ctx); err == nil {
 		s.updateWithTTL(ctx, userKey)
 	} else {
@@ -428,11 +430,13 @@ func updateUser(s *cacheServer, ctx context.Context, userKey string, userData ma
 		log.Println(cacheStorageMsg, err)
 		return
 	}
-	if err := s.rdb.HSet(ctx, userKey, userData).Err(); err != nil {
-		log.Println(cacheStorageMsg, err)
-		return
+	if len(userData) != 0 {
+		if err := s.rdb.HSet(ctx, userKey, userData).Err(); err != nil {
+			log.Println(cacheStorageMsg, err)
+			return
+		}
+		s.updateWithTTL(ctx, userKey)
 	}
-	s.updateWithTTL(ctx, userKey)
 }
 
 func logCacheAccessError(err error) {
