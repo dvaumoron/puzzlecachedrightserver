@@ -3,7 +3,7 @@ module github.com/dvaumoron/puzzlecachedrightserver
 go 1.19
 
 require (
-	github.com/dvaumoron/puzzlegrpcserver v1.0.1
+	github.com/dvaumoron/puzzlegrpcserver v1.1.0
 	github.com/dvaumoron/puzzleredisclient v1.0.1
 	github.com/dvaumoron/puzzlerightservice v1.3.0
 	github.com/redis/go-redis/v9 v9.0.1
