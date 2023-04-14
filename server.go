@@ -36,7 +36,7 @@ func main() {
 
 	dataTimeoutSec, err := strconv.ParseInt(os.Getenv("UNUSED_DATA_TIMEOUT"), 10, 64)
 	if err != nil {
-		log.Fatal("Failed to parse UNUSED_DATA_TIMEOUT")
+		log.Fatalln("Failed to parse UNUSED_DATA_TIMEOUT")
 	}
 	dataTimeout := time.Duration(dataTimeoutSec) * time.Second
 
