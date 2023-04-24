@@ -20,8 +20,6 @@ package cachedrightserver
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +27,7 @@ import (
 
 	pb "github.com/dvaumoron/puzzlerightservice"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -39,8 +38,8 @@ const createIndicator = 'C'
 const updateIndicator = 'U'
 const deleteIndicator = 'D'
 
-const rightCallMsg = "Failed to call right service :"
-const cacheStorageMsg = "Failed to store in cache :"
+const rightCallMsg = "Failed to call right service"
+const cacheStorageMsg = "Failed to store in cache"
 
 var errInternal = errors.New("internal service error")
 
@@ -52,19 +51,20 @@ type cacheServer struct {
 	callingServer
 	rdb         *redis.Client
 	dataTimeout time.Duration
-	ttlUpdater  func(*redis.Client, context.Context, string, time.Duration)
+	ttlUpdater  func(*redis.Client, *zap.Logger, context.Context, string, time.Duration)
 	mutex       sync.RWMutex
 	roleToUser  map[string]map[uint64]empty
 	sf          singleflight.Group
-	roleUpdater func(*redis.Client, context.Context, *pb.Roles, time.Duration)
+	roleUpdater func(*cacheServer, context.Context, *pb.Roles, time.Duration)
 	userUpdater func(*cacheServer, context.Context, string, map[string]any, map[string]string)
+	logger      *zap.Logger
 }
 
-func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, debug bool) pb.RightServer {
+func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, logger *zap.Logger, debug bool) pb.RightServer {
 	rolesUpdater := updateRolesTx
 	userUpdater := updateUserTx
 	if debug {
-		log.Println("Mode debug on")
+		logger.Info("Mode debug on")
 		rolesUpdater = updateRoles
 		userUpdater = updateUser
 	}
@@ -76,7 +76,7 @@ func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, 
 	return &cacheServer{
 		callingServer: makeCallingServer(rightServiceAddr), rdb: rdb, dataTimeout: dataTimeout,
 		ttlUpdater: ttlUpdater, roleToUser: map[string]map[uint64]empty{}, roleUpdater: rolesUpdater,
-		userUpdater: userUpdater,
+		userUpdater: userUpdater, logger: logger,
 	}
 }
 
@@ -96,17 +96,17 @@ func (s *cacheServer) storeRoleToUser(roleKey string, userId uint64) {
 	}
 }
 
-func updateWithTTL(rdb *redis.Client, ctx context.Context, id string, dataTimeout time.Duration) {
+func updateWithTTL(rdb *redis.Client, logger *zap.Logger, ctx context.Context, id string, dataTimeout time.Duration) {
 	if err := rdb.Expire(ctx, id, dataTimeout).Err(); err != nil {
-		log.Println("Failed to set TTL :", err)
+		logger.Info("Failed to set TTL", zap.Error(err))
 	}
 }
 
-func noTTLUpdate(rdb *redis.Client, ctx context.Context, id string, dataTimeout time.Duration) {
+func noTTLUpdate(rdb *redis.Client, logger *zap.Logger, ctx context.Context, id string, dataTimeout time.Duration) {
 }
 
 func (s *cacheServer) updateWithTTL(ctx context.Context, id string) {
-	s.ttlUpdater(s.rdb, ctx, id, s.dataTimeout)
+	s.ttlUpdater(s.rdb, s.logger, ctx, id, s.dataTimeout)
 }
 
 func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {
@@ -124,11 +124,11 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 			s.updateWithTTL(ctx, userKey)
 			return &pb.Response{Success: cacheRes == trueIndicator}, nil
 		}
-		logCacheAccessError(err)
+		s.logCacheAccessError(err)
 
 		response, err := s.callingServer.AuthQuery(ctx, request)
 		if err != nil {
-			log.Println(rightCallMsg, err)
+			s.logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
@@ -142,7 +142,7 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 		if err2 == nil {
 			s.updateWithTTL(ctx, userKey)
 		} else {
-			log.Println(cacheStorageMsg, err2)
+			s.logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 		return response, nil
 	})
@@ -154,10 +154,10 @@ func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb
 	// no cache for this call (only admin should use)
 	roles, err := s.callingServer.ListRoles(ctx, request)
 	if err != nil {
-		log.Println(rightCallMsg, err)
+		s.logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
-	s.roleUpdater(s.rdb, ctx, roles, s.dataTimeout)
+	s.roleUpdater(s, ctx, roles, s.dataTimeout)
 	return roles, nil
 }
 
@@ -169,11 +169,11 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 			s.updateWithTTL(ctx, roleKey)
 			return &pb.Actions{List: actionsFromCache(cacheRes)}, nil
 		}
-		logCacheAccessError(err)
+		s.logCacheAccessError(err)
 
 		actions, err := s.callingServer.RoleRight(ctx, request)
 		if err != nil {
-			log.Println(rightCallMsg, err)
+			s.logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
@@ -182,7 +182,7 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 		if err2 == nil {
 			s.updateWithTTL(ctx, roleKey)
 		} else {
-			log.Println(cacheStorageMsg, err2)
+			s.logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 		return actions, err
 	})
@@ -193,14 +193,14 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateUser(ctx, request)
 	if err != nil {
-		log.Println(rightCallMsg, err)
+		s.logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
 	if response.Success {
 		// invalidate corresponding key in cache
 		err2 := s.rdb.Del(ctx, getUserKey(request.UserId)).Err()
 		if err2 != nil {
-			log.Println(cacheStorageMsg, err2)
+			s.logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 	}
 	return response, nil
@@ -209,7 +209,7 @@ func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*p
 func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
 	response, err := s.callingServer.UpdateRole(ctx, request)
 	if err != nil {
-		log.Println(rightCallMsg, err)
+		s.logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
 	if response.Success {
@@ -230,7 +230,7 @@ func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Res
 			}
 		}
 		if err2 != nil {
-			log.Println(cacheStorageMsg, err2)
+			s.logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 	}
 	return response, nil
@@ -259,12 +259,12 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 				return &pb.Roles{List: list}, nil
 			}
 		} else {
-			logCacheAccessError(err)
+			s.logCacheAccessError(err)
 		}
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err != nil {
-			log.Println(rightCallMsg, err)
+			s.logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
@@ -309,11 +309,15 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 }
 
 func getUserKey(userId uint64) string {
-	return fmt.Sprintf("user:%d", userId)
+	return "user:" + strconv.FormatUint(userId, 10)
 }
 
 func getActionKey(objectId uint64, action pb.RightAction) string {
-	return fmt.Sprintf("%d/%c", objectId, actionFromCall(action))
+	var keyBuilder strings.Builder
+	keyBuilder.WriteString(strconv.FormatUint(objectId, 10))
+	keyBuilder.WriteByte('/')
+	keyBuilder.WriteByte(actionFromCall(action))
+	return keyBuilder.String()
 }
 
 func actionFromCall(action pb.RightAction) byte {
@@ -331,7 +335,12 @@ func actionFromCall(action pb.RightAction) byte {
 }
 
 func getRoleKey(roleName string, objectId uint64) string {
-	return fmt.Sprintf("role:%v/%d", roleName, objectId)
+	var keyBuilder strings.Builder
+	keyBuilder.WriteString("role:")
+	keyBuilder.WriteString(roleName)
+	keyBuilder.WriteByte('/')
+	keyBuilder.WriteString(strconv.FormatUint(objectId, 10))
+	return keyBuilder.String()
 }
 
 func actionsFromCache(cacheRes string) []pb.RightAction {
@@ -368,24 +377,24 @@ func uniqueActions(actions []pb.RightAction) map[pb.RightAction]empty {
 	return res
 }
 
-func updateRolesTx(rdb *redis.Client, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
-	pipe := rdb.TxPipeline()
+func updateRolesTx(s *cacheServer, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+	pipe := s.rdb.TxPipeline()
 	for _, role := range roles.List {
 		roleKey := getRoleKey(role.Name, role.ObjectId)
 		actionsStr, _ := actionsFromCall(role.List)
 		pipe.Set(ctx, roleKey, actionsStr, dataTimeout)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		log.Println(cacheStorageMsg, err)
+		s.logger.Error(cacheStorageMsg, zap.Error(err))
 	}
 }
 
-func updateRoles(rdb *redis.Client, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+func updateRoles(s *cacheServer, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
 	for _, role := range roles.List {
 		roleKey := getRoleKey(role.Name, role.ObjectId)
 		actionsStr, _ := actionsFromCall(role.List)
-		if err := rdb.Set(ctx, roleKey, actionsStr, dataTimeout).Err(); err != nil {
-			log.Println(cacheStorageMsg, err)
+		if err := s.rdb.Set(ctx, roleKey, actionsStr, dataTimeout).Err(); err != nil {
+			s.logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
 	}
@@ -409,7 +418,7 @@ func updateUserTx(s *cacheServer, ctx context.Context, userKey string, userData 
 	if _, err := pipe.Exec(ctx); err == nil {
 		s.updateWithTTL(ctx, userKey)
 	} else {
-		log.Println(cacheStorageMsg, err)
+		s.logger.Error(cacheStorageMsg, zap.Error(err))
 	}
 }
 
@@ -417,7 +426,7 @@ func updateUser(s *cacheServer, ctx context.Context, userKey string, userData ma
 	// here userData contains only the roles
 	for roleKey, actionsStr := range userData {
 		if err := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err(); err != nil {
-			log.Println(cacheStorageMsg, err)
+			s.logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
 	}
@@ -427,20 +436,20 @@ func updateUser(s *cacheServer, ctx context.Context, userKey string, userData ma
 	}
 
 	if err := s.rdb.Del(ctx, userKey).Err(); err != nil {
-		log.Println(cacheStorageMsg, err)
+		s.logger.Error(cacheStorageMsg, zap.Error(err))
 		return
 	}
 	if len(userData) != 0 {
 		if err := s.rdb.HSet(ctx, userKey, userData).Err(); err != nil {
-			log.Println(cacheStorageMsg, err)
+			s.logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
 		s.updateWithTTL(ctx, userKey)
 	}
 }
 
-func logCacheAccessError(err error) {
+func (s *cacheServer) logCacheAccessError(err error) {
 	if err != redis.Nil {
-		log.Println("Failed to access cache :", err)
+		s.logger.Error("Failed to access cache", zap.Error(err))
 	}
 }

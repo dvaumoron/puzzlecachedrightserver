@@ -20,6 +20,7 @@ package cachedrightserver
 import (
 	"context"
 
+	grpcclient "github.com/dvaumoron/puzzlegrpcclient"
 	pb "github.com/dvaumoron/puzzlerightservice"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -29,15 +30,15 @@ import (
 // it call another server using gRPC
 type callingServer struct {
 	pb.UnimplementedRightServer
-	rightServiceAddr string
+	grpcclient.Client
 }
 
 func makeCallingServer(rightServiceAddr string) callingServer {
-	return callingServer{rightServiceAddr: rightServiceAddr}
+	return callingServer{Client: grpcclient.Make(rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), 0)}
 }
 
 func (s *callingServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +48,7 @@ func (s *callingServer) AuthQuery(ctx context.Context, request *pb.RightRequest)
 }
 
 func (s *callingServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +58,7 @@ func (s *callingServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*
 }
 
 func (s *callingServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*pb.Actions, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func (s *callingServer) RoleRight(ctx context.Context, request *pb.RoleRequest) 
 }
 
 func (s *callingServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +78,7 @@ func (s *callingServer) UpdateUser(ctx context.Context, request *pb.UserRight) (
 }
 
 func (s *callingServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +88,7 @@ func (s *callingServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.R
 }
 
 func (s *callingServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*pb.Roles, error) {
-	conn, err := grpc.Dial(s.rightServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := s.Dial()
 	if err != nil {
 		return nil, err
 	}

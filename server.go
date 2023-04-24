@@ -18,7 +18,6 @@
 package main
 
 import (
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -32,20 +31,20 @@ import (
 
 func main() {
 	// should start with this, to benefit from the call to godotenv
-	s := grpcserver.New()
+	s := grpcserver.Make()
 
 	dataTimeoutSec, err := strconv.ParseInt(os.Getenv("UNUSED_DATA_TIMEOUT"), 10, 64)
 	if err != nil {
-		log.Fatalln("Failed to parse UNUSED_DATA_TIMEOUT")
+		s.Logger.Fatal("Failed to parse UNUSED_DATA_TIMEOUT")
 	}
 	dataTimeout := time.Duration(dataTimeoutSec) * time.Second
 
 	debug := strings.TrimSpace(os.Getenv("DEBUG_MODE")) != ""
 
-	rdb := redisclient.Create()
+	rdb := redisclient.Create(s.Logger)
 
 	pb.RegisterRightServer(s, cachedrightserver.New(
-		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout, debug,
+		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout, s.Logger, debug,
 	))
 
 	s.Start()
