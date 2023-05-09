@@ -18,6 +18,7 @@
 package main
 
 import (
+	_ "embed"
 	"os"
 	"strconv"
 	"strings"
@@ -29,9 +30,12 @@ import (
 	pb "github.com/dvaumoron/puzzlerightservice"
 )
 
+//go:embed version.txt
+var version string
+
 func main() {
 	// should start with this, to benefit from the call to godotenv
-	s := grpcserver.Make()
+	s := grpcserver.Make(cachedrightserver.CachedKey, version)
 
 	dataTimeoutSec, err := strconv.ParseInt(os.Getenv("UNUSED_DATA_TIMEOUT"), 10, 64)
 	if err != nil {
@@ -44,7 +48,7 @@ func main() {
 	rdb := redisclient.Create(s.Logger)
 
 	pb.RegisterRightServer(s, cachedrightserver.New(
-		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout, s.Logger, debug,
+		os.Getenv("RIGHT_SERVICE_ADDR"), rdb, dataTimeout, s.Logger, s.TracerProvider, debug,
 	))
 
 	s.Start()

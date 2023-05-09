@@ -27,9 +27,13 @@ import (
 
 	pb "github.com/dvaumoron/puzzlerightservice"
 	"github.com/redis/go-redis/v9"
+	"github.com/uptrace/opentelemetry-go-extra/otelzap"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
+
+const CachedKey = "puzzleCachedRight"
 
 const trueIndicator = "T"
 const falseIndicator = "F"
@@ -51,20 +55,23 @@ type cacheServer struct {
 	callingServer
 	rdb         *redis.Client
 	dataTimeout time.Duration
-	ttlUpdater  func(*redis.Client, *zap.Logger, context.Context, string, time.Duration)
+	ttlUpdater  func(*redis.Client, otelzap.LoggerWithCtx, string, time.Duration)
 	mutex       sync.RWMutex
 	roleToUser  map[string]map[uint64]empty
 	sf          singleflight.Group
-	roleUpdater func(*cacheServer, context.Context, *pb.Roles, time.Duration)
-	userUpdater func(*cacheServer, context.Context, string, map[string]any, map[string]string)
-	logger      *zap.Logger
+	roleUpdater func(*cacheServer, otelzap.LoggerWithCtx, *pb.Roles, time.Duration)
+	userUpdater func(*cacheServer, otelzap.LoggerWithCtx, string, map[string]any, map[string]string)
+	logger      *otelzap.Logger
 }
 
-func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, logger *zap.Logger, debug bool) pb.RightServer {
+func New(rightServiceAddr string, rdb *redis.Client, dataTimeout time.Duration, logger *otelzap.Logger, tp trace.TracerProvider, debug bool) pb.RightServer {
 	rolesUpdater := updateRolesTx
 	userUpdater := updateUserTx
 	if debug {
-		logger.Info("Mode debug on")
+		ctx, initSpan := tp.Tracer(CachedKey).Start(context.Background(), "initialization")
+		defer initSpan.End()
+
+		logger.InfoContext(ctx, "Mode debug on")
 		rolesUpdater = updateRoles
 		userUpdater = updateUser
 	}
@@ -96,20 +103,21 @@ func (s *cacheServer) storeRoleToUser(roleKey string, userId uint64) {
 	}
 }
 
-func updateWithTTL(rdb *redis.Client, logger *zap.Logger, ctx context.Context, id string, dataTimeout time.Duration) {
-	if err := rdb.Expire(ctx, id, dataTimeout).Err(); err != nil {
+func updateWithTTL(rdb *redis.Client, logger otelzap.LoggerWithCtx, id string, dataTimeout time.Duration) {
+	if err := rdb.Expire(logger.Context(), id, dataTimeout).Err(); err != nil {
 		logger.Info("Failed to set TTL", zap.Error(err))
 	}
 }
 
-func noTTLUpdate(rdb *redis.Client, logger *zap.Logger, ctx context.Context, id string, dataTimeout time.Duration) {
+func noTTLUpdate(rdb *redis.Client, logger otelzap.LoggerWithCtx, id string, dataTimeout time.Duration) {
 }
 
-func (s *cacheServer) updateWithTTL(ctx context.Context, id string) {
-	s.ttlUpdater(s.rdb, s.logger, ctx, id, s.dataTimeout)
+func (s *cacheServer) updateWithTTL(logger otelzap.LoggerWithCtx, id string) {
+	s.ttlUpdater(s.rdb, logger, id, s.dataTimeout)
 }
 
 func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (*pb.Response, error) {
+	logger := s.logger.Ctx(ctx)
 	userId := request.UserId
 	userKey := getUserKey(userId)
 	actionKey := getActionKey(request.ObjectId, request.Action)
@@ -121,10 +129,10 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 	untyped, err, _ := s.sf.Do(requestKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.HGet(ctx, userKey, actionKey).Result()
 		if err == nil {
-			s.updateWithTTL(ctx, userKey)
+			s.updateWithTTL(logger, userKey)
 			return &pb.Response{Success: cacheRes == trueIndicator}, nil
 		}
-		s.logCacheAccessError(err)
+		logCacheAccessError(logger, err)
 
 		response, err := s.callingServer.AuthQuery(ctx, request)
 		if err != nil {
@@ -140,9 +148,9 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 		}
 		err2 := s.rdb.HSet(ctx, userKey, actionKey, value).Err()
 		if err2 == nil {
-			s.updateWithTTL(ctx, userKey)
+			s.updateWithTTL(logger, userKey)
 		} else {
-			s.logger.Error(cacheStorageMsg, zap.Error(err2))
+			logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 		return response, nil
 	})
@@ -151,38 +159,40 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 }
 
 func (s *cacheServer) ListRoles(ctx context.Context, request *pb.ObjectIds) (*pb.Roles, error) {
+	logger := s.logger.Ctx(ctx)
 	// no cache for this call (only admin should use)
 	roles, err := s.callingServer.ListRoles(ctx, request)
 	if err != nil {
-		s.logger.Error(rightCallMsg, zap.Error(err))
+		logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
-	s.roleUpdater(s, ctx, roles, s.dataTimeout)
+	s.roleUpdater(s, logger, roles, s.dataTimeout)
 	return roles, nil
 }
 
 func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*pb.Actions, error) {
+	logger := s.logger.Ctx(ctx)
 	roleKey := getRoleKey(request.Name, request.ObjectId)
 	untyped, err, _ := s.sf.Do(roleKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.Get(ctx, roleKey).Result()
 		if err == nil {
-			s.updateWithTTL(ctx, roleKey)
+			s.updateWithTTL(logger, roleKey)
 			return &pb.Actions{List: actionsFromCache(cacheRes)}, nil
 		}
-		s.logCacheAccessError(err)
+		logCacheAccessError(logger, err)
 
 		actions, err := s.callingServer.RoleRight(ctx, request)
 		if err != nil {
-			s.logger.Error(rightCallMsg, zap.Error(err))
+			logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
 		actionsStr, _ := actionsFromCall(actions.List)
 		err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
 		if err2 == nil {
-			s.updateWithTTL(ctx, roleKey)
+			s.updateWithTTL(logger, roleKey)
 		} else {
-			s.logger.Error(cacheStorageMsg, zap.Error(err2))
+			logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 		return actions, err
 	})
@@ -191,25 +201,27 @@ func (s *cacheServer) RoleRight(ctx context.Context, request *pb.RoleRequest) (*
 }
 
 func (s *cacheServer) UpdateUser(ctx context.Context, request *pb.UserRight) (*pb.Response, error) {
+	logger := s.logger.Ctx(ctx)
 	response, err := s.callingServer.UpdateUser(ctx, request)
 	if err != nil {
-		s.logger.Error(rightCallMsg, zap.Error(err))
+		logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
 	if response.Success {
 		// invalidate corresponding key in cache
 		err2 := s.rdb.Del(ctx, getUserKey(request.UserId)).Err()
 		if err2 != nil {
-			s.logger.Error(cacheStorageMsg, zap.Error(err2))
+			logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 	}
 	return response, nil
 }
 
 func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Response, error) {
+	logger := s.logger.Ctx(ctx)
 	response, err := s.callingServer.UpdateRole(ctx, request)
 	if err != nil {
-		s.logger.Error(rightCallMsg, zap.Error(err))
+		logger.Error(rightCallMsg, zap.Error(err))
 		return nil, errInternal
 	}
 	if response.Success {
@@ -226,23 +238,24 @@ func (s *cacheServer) UpdateRole(ctx context.Context, request *pb.Role) (*pb.Res
 			actionsStr, _ := actionsFromCall(request.List)
 			err2 := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err()
 			if err2 == nil {
-				s.updateWithTTL(ctx, roleKey)
+				s.updateWithTTL(logger, roleKey)
 			}
 		}
 		if err2 != nil {
-			s.logger.Error(cacheStorageMsg, zap.Error(err2))
+			logger.Error(cacheStorageMsg, zap.Error(err2))
 		}
 	}
 	return response, nil
 }
 
 func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*pb.Roles, error) {
+	logger := s.logger.Ctx(ctx)
 	userId := request.Id
 	userKey := getUserKey(userId)
 	untyped, err, _ := s.sf.Do(userKey, func() (interface{}, error) {
 		cacheRes, err := s.rdb.HGetAll(ctx, userKey).Result()
 		if err == nil {
-			s.updateWithTTL(ctx, userKey)
+			s.updateWithTTL(logger, userKey)
 
 			list := []*pb.Role{}
 			for roleKey, actions := range cacheRes {
@@ -259,12 +272,12 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 				return &pb.Roles{List: list}, nil
 			}
 		} else {
-			s.logCacheAccessError(err)
+			logCacheAccessError(logger, err)
 		}
 
 		roles, err := s.callingServer.ListUserRoles(ctx, request)
 		if err != nil {
-			s.logger.Error(rightCallMsg, zap.Error(err))
+			logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
@@ -301,7 +314,7 @@ func (s *cacheServer) ListUserRoles(ctx context.Context, request *pb.UserId) (*p
 			}
 		}
 
-		s.userUpdater(s, ctx, userKey, userData, actionKeyIndicators)
+		s.userUpdater(s, logger, userKey, userData, actionKeyIndicators)
 		return roles, nil
 	})
 	roles, _ := untyped.(*pb.Roles)
@@ -377,7 +390,8 @@ func uniqueActions(actions []pb.RightAction) map[pb.RightAction]empty {
 	return res
 }
 
-func updateRolesTx(s *cacheServer, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+func updateRolesTx(s *cacheServer, logger otelzap.LoggerWithCtx, roles *pb.Roles, dataTimeout time.Duration) {
+	ctx := logger.Context()
 	pipe := s.rdb.TxPipeline()
 	for _, role := range roles.List {
 		roleKey := getRoleKey(role.Name, role.ObjectId)
@@ -385,22 +399,24 @@ func updateRolesTx(s *cacheServer, ctx context.Context, roles *pb.Roles, dataTim
 		pipe.Set(ctx, roleKey, actionsStr, dataTimeout)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		s.logger.Error(cacheStorageMsg, zap.Error(err))
+		logger.Error(cacheStorageMsg, zap.Error(err))
 	}
 }
 
-func updateRoles(s *cacheServer, ctx context.Context, roles *pb.Roles, dataTimeout time.Duration) {
+func updateRoles(s *cacheServer, logger otelzap.LoggerWithCtx, roles *pb.Roles, dataTimeout time.Duration) {
+	ctx := logger.Context()
 	for _, role := range roles.List {
 		roleKey := getRoleKey(role.Name, role.ObjectId)
 		actionsStr, _ := actionsFromCall(role.List)
 		if err := s.rdb.Set(ctx, roleKey, actionsStr, dataTimeout).Err(); err != nil {
-			s.logger.Error(cacheStorageMsg, zap.Error(err))
+			logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
 	}
 }
 
-func updateUserTx(s *cacheServer, ctx context.Context, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+func updateUserTx(s *cacheServer, logger otelzap.LoggerWithCtx, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+	ctx := logger.Context()
 	pipe := s.rdb.TxPipeline()
 	// here userData contains only the roles
 	for roleKey, actionsStr := range userData {
@@ -416,17 +432,18 @@ func updateUserTx(s *cacheServer, ctx context.Context, userKey string, userData 
 		pipe.HSet(ctx, userKey, userData)
 	}
 	if _, err := pipe.Exec(ctx); err == nil {
-		s.updateWithTTL(ctx, userKey)
+		s.updateWithTTL(logger, userKey)
 	} else {
-		s.logger.Error(cacheStorageMsg, zap.Error(err))
+		logger.Error(cacheStorageMsg, zap.Error(err))
 	}
 }
 
-func updateUser(s *cacheServer, ctx context.Context, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+func updateUser(s *cacheServer, logger otelzap.LoggerWithCtx, userKey string, userData map[string]any, actionKeyIndicators map[string]string) {
+	ctx := logger.Context()
 	// here userData contains only the roles
 	for roleKey, actionsStr := range userData {
 		if err := s.rdb.Set(ctx, roleKey, actionsStr, s.dataTimeout).Err(); err != nil {
-			s.logger.Error(cacheStorageMsg, zap.Error(err))
+			logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
 	}
@@ -436,20 +453,20 @@ func updateUser(s *cacheServer, ctx context.Context, userKey string, userData ma
 	}
 
 	if err := s.rdb.Del(ctx, userKey).Err(); err != nil {
-		s.logger.Error(cacheStorageMsg, zap.Error(err))
+		logger.Error(cacheStorageMsg, zap.Error(err))
 		return
 	}
 	if len(userData) != 0 {
 		if err := s.rdb.HSet(ctx, userKey, userData).Err(); err != nil {
-			s.logger.Error(cacheStorageMsg, zap.Error(err))
+			logger.Error(cacheStorageMsg, zap.Error(err))
 			return
 		}
-		s.updateWithTTL(ctx, userKey)
+		s.updateWithTTL(logger, userKey)
 	}
 }
 
-func (s *cacheServer) logCacheAccessError(err error) {
+func logCacheAccessError(logger otelzap.LoggerWithCtx, err error) {
 	if err != redis.Nil {
-		s.logger.Error("Failed to access cache", zap.Error(err))
+		logger.WithOptions(zap.AddCallerSkip(1)).Error("Failed to access cache", zap.Error(err))
 	}
 }

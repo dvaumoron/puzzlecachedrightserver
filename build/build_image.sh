@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-go install
+./build/build.sh
 
 buildah from --name puzzlecachedrightserver-working-container scratch
 buildah copy puzzlecachedrightserver-working-container $HOME/go/bin/puzzlecachedrightserver /bin/puzzlecachedrightserver
