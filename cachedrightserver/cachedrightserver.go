@@ -136,7 +136,7 @@ func (s *cacheServer) AuthQuery(ctx context.Context, request *pb.RightRequest) (
 
 		response, err := s.callingServer.AuthQuery(ctx, request)
 		if err != nil {
-			s.logger.Error(rightCallMsg, zap.Error(err))
+			logger.Error(rightCallMsg, zap.Error(err))
 			return nil, errInternal
 		}
 
